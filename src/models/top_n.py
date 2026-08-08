@@ -1,29 +1,23 @@
-"""01 — Top N Most-Played Songs."""
-
-from __future__ import annotations
-
 import pandas as pd
 
 from src.data.loader import MySpotifyRecommender
 
 
-def top_n_songs(rs: MySpotifyRecommender, n: int = 250) -> pd.DataFrame:
-    """Return the *n* globally most-played songs ranked by total play count.
+def top_n_songs(rs: MySpotifyRecommender, n: int = 10, user_id: str | None = None) -> pd.DataFrame:
+    if user_id is not None:
+        # (user_id, song_id) is unique -> no groupby needed
+        top = rs.triplets[rs.triplets["user_id"] == user_id][["song_id", "play_count"]] \
+            .nlargest(n, "play_count")
+    else:
+        top = rs.triplets[["song_id", "play_count"]] \
+            .groupby("song_id", as_index=False)["play_count"].sum() \
+            .nlargest(n, "play_count")
 
-    Algorithm
-    ---------
-    1. Aggregate ``play_count`` (sum) per ``song_id``.
-    2. Rank descending, keep top *n*.
-    3. Enrich with artist / title from ``tracks``.
-
-    Returns
-    -------
-    DataFrame with columns: rank (index), artist, title, play_count
-    """
-    song_plays = rs.song_plays()
-    enriched = rs.enrich(song_plays)
-
-    result = enriched.head(n).reset_index(drop=True)
-    result.index += 1
-    result.index.name = "rank"
-    return result[["artist", "title", "play_count"]]
+    df = top.merge(
+        rs.tracks.drop_duplicates("song_id")[["song_id", "track_id", "artist", "title"]],
+        on="song_id",
+        how="left",
+    )
+    # order columns
+    df = df[["track_id", "artist", "title", "play_count"]]
+    return df

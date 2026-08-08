@@ -1,9 +1,0 @@
-.venv/
-.git/
-__pycache__/
-*.pyc
-data/raw/
-data/csv/
-.ipynb_checkpoints/
-.ruff_cache/
-.mypy_cache/
