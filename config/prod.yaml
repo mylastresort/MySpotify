@@ -1,0 +1,35 @@
+project:
+  name: myspotify
+  version: "0.1.0"
+  description: "Music recommendation system research on the Million Song Dataset"
+
+data:
+  dataset_slug: "mylastresort/p02-myspotify"
+  raw_dir: "data/raw"
+  csv_dir: "data/csv"
+  features_dir: "data/features"
+  predictions_dir: "data/predictions"
+
+  files:
+    tracks: "p02_unique_tracks.txt"
+    genres: "p02_msd_tagtraum_cd2.cls"
+    triplets: "train_triplets.txt"
+    lyrics: "mxm_dataset_train.txt"
+
+model:
+  collaborative_filtering:
+    test_ratio: 0.2
+    min_test: 2
+    k_neighbors: 50
+    top_n: 10
+    precision_target: 0.10
+
+  collections:
+    default_n: 50
+    default_threshold: 1
+    word2vec_top_similar: 10
+    classification_max_iter: 500
+    classification_max_features: 10000
+
+  top_n:
+    default_top: 250

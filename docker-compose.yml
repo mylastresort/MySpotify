@@ -1,0 +1,14 @@
+services:
+  train:
+    build: .
+    volumes:
+      - ./data:/app/data
+    environment:
+      - KAGGLE_DATASET_SLUG=${KAGGLE_DATASET_SLUG:-mylastresort/p02-myspotify}
+    entrypoint: ["python", "entrypoint/train.py", "--env", "local"]
+
+  inference:
+    build: .
+    volumes:
+      - ./data:/app/data
+    entrypoint: ["python", "entrypoint/inference.py"]

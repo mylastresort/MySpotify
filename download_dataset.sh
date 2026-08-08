@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DATASET_SLUG="${KAGGLE_DATASET_SLUG:-mylastresort/p02-myspotify}"
-OUTPUT_DIR="${MYSPOTIFY_DATA_DIR:-data/P02. MySpotify}"
+OUTPUT_DIR="${MYSPOTIFY_DATA_DIR:-data/raw}"
 
 if ! command -v kaggle >/dev/null 2>&1; then
   echo "kaggle CLI is not installed or not on PATH" >&2

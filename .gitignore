@@ -79,7 +79,19 @@ target/
 .ipynb_checkpoints
 
 # Local dataset downloads
-data/
+data/raw/
+data/csv/
+data/processed/
+data/features/
+data/predictions/
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Docker
+.env
 
 # IPython
 profile_default/
