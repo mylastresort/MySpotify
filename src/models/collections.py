@@ -62,8 +62,6 @@ def collection_baseline(
             continue
         df = (
             rs.lyrics_long.filter(pl.col("word").is_in(tokens))
-            .group_by("track_id", maintain_order=True)
-            .agg(pl.col("count").max())
             .filter(pl.col("count") >= n)
             .join(tracks, on="track_id", how="left")
             .join(plays, on="song_id", how="left")
@@ -98,8 +96,6 @@ def collection_word2vec(
             continue
         df = (
             rs.lyrics_long.filter(pl.col("word").is_in(sorted(tokens)))
-            .group_by("track_id", maintain_order=True)
-            .agg(pl.col("count").sum())
             .filter(pl.col("count") >= n)
             .join(tracks, on="track_id", how="left")
             .join(plays, on="song_id", how="left")
