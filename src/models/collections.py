@@ -1,16 +1,8 @@
-"""Collections: 50 most-played songs about a keyword.
-
-Three approaches over the full in-memory tables (no streaming):
-  * baseline        — tracks where the keyword token appears at least ``n`` times
-  * word2vec        — keyword expanded with embedding neighbours, then summed
-  * classification  — ML classifiers on the TF-IDF sparse lyrics matrix
-"""
-
-from __future__ import annotations
+"""Collections: 50 most-played songs about a keyword (baseline, word2vec, classification)."""
 
 import gensim.downloader
 import numpy as np
-import pandas as pd
+import polars as pl
 from gensim.parsing.preprocessing import PorterStemmer
 from scipy import sparse
 from sklearn.ensemble import RandomForestClassifier
@@ -20,19 +12,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 
-from src.data.loader import MySpotifyRecommender
+from src.data import MySpotifyRecommender
 
 _STEMMER = PorterStemmer()
+EMPTY = pl.DataFrame(
+    schema={"artist": pl.Utf8, "title": pl.Utf8, "play_count": pl.Int64}
+)
 
 
 def _vocab_tokens(kw: str, vocab: set[str]) -> list[str]:
-    """Map a raw keyword to the tokens present in the (Porter-stemmed) lyrics vocab.
-
-    The musiXmatch vocabulary stores stems, so ``happiness`` / ``loneliness``
-    appear as ``happi`` / ``loneli``. An exact vocab match wins; otherwise the
-    Porter stem is tried. Keywords matching nothing return ``[]`` (which yields
-    an empty result instead of a crash).
-    """
     if kw in vocab:
         return [kw]
     stem = _STEMMER.stem(kw)
@@ -40,18 +28,19 @@ def _vocab_tokens(kw: str, vocab: set[str]) -> list[str]:
 
 
 def _tracks_plays(rs: MySpotifyRecommender):
-    tracks = rs.tracks.drop_duplicates("track_id")[
-        ["track_id", "song_id", "artist", "title"]
-    ]
-    plays = rs.triplets.groupby("song_id", as_index=False)["play_count"].sum()
+    tracks = rs.tracks.unique(subset="track_id", keep="first").select(
+        "track_id", "song_id", "artist", "title"
+    )
+    plays = rs.triplets.group_by("song_id").agg(pl.col("play_count").sum())
     return tracks, plays
 
 
-def _format_result(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
+def _format_result(df: pl.DataFrame, top_n: int) -> pl.DataFrame:
     return (
-        df.sort_values("play_count", ascending=False)[["artist", "title", "play_count"]]
+        df.sort("play_count", descending=True, maintain_order=True)
         .head(top_n)
-        .pipe(lambda x: x.set_axis(range(1, len(x) + 1)))
+        .with_row_index("index", offset=1)
+        .select("index", "artist", "title", "play_count")
     )
 
 
@@ -60,24 +49,27 @@ def collection_baseline(
     kw: list[str],
     n: int = 10,
     top_n: int = 50,
-) -> dict[str, pd.DataFrame]:
+) -> dict[str, pl.DataFrame]:
     """Tracks where the keyword token appears at least ``n`` times."""
-    vocab = set(rs.lyrics_long["word"].unique())
+    vocab = set(rs.lyrics_long["word"].unique().to_list())
     tracks, plays = _tracks_plays(rs)
 
-    result: dict[str, pd.DataFrame] = {}
+    result: dict[str, pl.DataFrame] = {}
     for k in kw:
         tokens = _vocab_tokens(k, vocab)
         if not tokens:
-            result[k] = pd.DataFrame(columns=["artist", "title", "play_count"])
+            result[k] = EMPTY
             continue
-        df = rs.lyrics_long[rs.lyrics_long["word"].isin(tokens)]
-        df = df.groupby("track_id", as_index=False, sort=False)["count"].max()
-        df = df[df["count"] >= n]
-        df = df.merge(tracks, on="track_id", how="left")
-        df = df.merge(plays, on="song_id", how="left")
-        df["play_count"] = df["play_count"].fillna(0)
-        df = df.drop_duplicates("song_id")
+        df = (
+            rs.lyrics_long.filter(pl.col("word").is_in(tokens))
+            .group_by("track_id", maintain_order=True)
+            .agg(pl.col("count").max())
+            .filter(pl.col("count") >= n)
+            .join(tracks, on="track_id", how="left")
+            .join(plays, on="song_id", how="left")
+            .with_columns(pl.col("play_count").fill_null(0))
+            .unique(subset="song_id", keep="first")
+        )
         result[k] = _format_result(df, top_n)
     return result
 
@@ -89,27 +81,30 @@ def collection_word2vec(
     top_n: int = 50,
     neighbors: int = 10,
     model_name: str = "glove-wiki-gigaword-100",
-) -> dict[str, pd.DataFrame]:
+) -> dict[str, pl.DataFrame]:
     """Keyword expanded with embedding neighbours; summed token count >= n."""
     model = gensim.downloader.load(model_name)
-    vocab = set(rs.lyrics_long["word"].unique())
+    vocab = set(rs.lyrics_long["word"].unique().to_list())
     tracks, plays = _tracks_plays(rs)
 
-    result: dict[str, pd.DataFrame] = {}
+    result: dict[str, pl.DataFrame] = {}
     for k in kw:
-        tokens: set[str] = set()
         seeds = [k] + ([w for w, _ in model.most_similar(k, topn=neighbors)] if k in model else [])
+        tokens = set()
         for t in seeds:
             tokens.update(_vocab_tokens(t, vocab))
         if not tokens:
-            result[k] = pd.DataFrame(columns=["artist", "title", "play_count"])
+            result[k] = EMPTY
             continue
-        df = rs.lyrics_long[rs.lyrics_long["word"].isin(sorted(tokens))]
-        df = df.groupby("track_id", as_index=False, sort=False)["count"].sum()
-        df = df[df["count"] >= n]
-        df = df.merge(tracks, on="track_id", how="left")
-        df = df.merge(plays, on="song_id", how="left")
-        df["play_count"] = df["play_count"].fillna(0)
+        df = (
+            rs.lyrics_long.filter(pl.col("word").is_in(sorted(tokens)))
+            .group_by("track_id", maintain_order=True)
+            .agg(pl.col("count").sum())
+            .filter(pl.col("count") >= n)
+            .join(tracks, on="track_id", how="left")
+            .join(plays, on="song_id", how="left")
+            .with_columns(pl.col("play_count").fill_null(0))
+        )
         result[k] = _format_result(df, top_n)
     return result
 
@@ -130,14 +125,18 @@ def _make_classifier(name: str, seed: int = 0, max_iter: int = 1000):
 
 
 def _lyric_counts(rs: MySpotifyRecommender):
-    """Sparse track x word matrix from the tidy lyrics table + vocab + track ids."""
     df = rs.lyrics_long
-    vocab = df["word"].astype("category").cat.categories.tolist()
-    track_ids = df["track_id"].astype("category").cat.categories.tolist()
-    trow = df["track_id"].astype("category").cat.codes.to_numpy()
-    wcol = df["word"].astype("category").cat.codes.to_numpy()
+    cat = df.select(
+        pl.col("track_id").cast(pl.Categorical).alias("tid"),
+        pl.col("word").cast(pl.Categorical).alias("word"),
+    )
+    vocab = cat["word"].cat.get_categories().to_list()
+    track_ids = cat["tid"].cat.get_categories().to_list()
     counts = sparse.coo_matrix(
-        (df["count"].to_numpy().astype(np.float64), (trow, wcol)),
+        (
+            df["count"].to_numpy().astype(np.float64),
+            (cat["tid"].to_physical().to_numpy(), cat["word"].to_physical().to_numpy()),
+        ),
         shape=(len(track_ids), len(vocab)),
     ).tocsr()
     return counts, vocab, np.asarray(track_ids, dtype=object)
@@ -147,8 +146,8 @@ def _classify_keywords(
     counts,
     vocab: list[str],
     track_ids,
-    tracks: pd.DataFrame,
-    plays: pd.DataFrame,
+    tracks: pl.DataFrame,
+    plays: pl.DataFrame,
     kw: list[str],
     classifier_names: tuple[str, ...],
     n: int,
@@ -156,16 +155,15 @@ def _classify_keywords(
     neg_ratio: int,
     max_iter: int,
     seed: int,
-) -> dict[str, dict[str, pd.DataFrame]]:
-    empty = pd.DataFrame(columns=["artist", "title", "play_count"])
-    result: dict[str, dict[str, pd.DataFrame]] = {name: {} for name in classifier_names}
+) -> dict[str, dict[str, pl.DataFrame]]:
+    result: dict[str, dict[str, pl.DataFrame]] = {name: {} for name in classifier_names}
     vocab_set = set(vocab)
     rng = np.random.default_rng(seed)
     for k in kw:
         tokens = _vocab_tokens(k, vocab_set)
         if not tokens:
             for name in classifier_names:
-                result[name][k] = empty.copy()
+                result[name][k] = EMPTY
             continue
         cols = [vocab.index(t) for t in tokens]
         y = np.asarray(counts[:, cols].max(axis=1).toarray()).ravel() >= n
@@ -173,7 +171,7 @@ def _classify_keywords(
         pos = np.flatnonzero(y == 1)
         if len(pos) == 0:
             for name in classifier_names:
-                result[name][k] = empty.copy()
+                result[name][k] = EMPTY
             continue
         train_idx, rest = train_test_split(
             np.arange(len(y)), test_size=0.3, stratify=y, random_state=seed
@@ -196,12 +194,17 @@ def _classify_keywords(
             )
             pipe.fit(counts[train_idx], y[train_idx])
             score = pipe.predict_proba(counts[rest])[:, 1]
-            df = pd.DataFrame({"track_id": track_ids[rest], "score": score})
-            df = df.merge(tracks, on="track_id", how="left").merge(plays, on="song_id", how="left")
-            df["play_count"] = df["play_count"].fillna(0)
-            df = df.sort_values(["score", "play_count"], ascending=[False, False]).head(top_n)
-            df.index = range(1, len(df) + 1)
-            result[name][k] = df[["artist", "title", "play_count"]]
+            df = (
+                pl.DataFrame({"track_id": track_ids[rest].tolist(), "score": score})
+                .join(tracks, on="track_id", how="left")
+                .join(plays, on="song_id", how="left")
+                .with_columns(pl.col("play_count").fill_null(0))
+                .sort(["score", "play_count"], descending=[True, False])
+                .head(top_n)
+                .with_row_index("index", offset=1)
+                .select("index", "artist", "title", "play_count")
+            )
+            result[name][k] = df
     return result
 
 
@@ -214,7 +217,7 @@ def collection_classification(
     classifier: str = "logistic",
     max_iter: int = 1000,
     seed: int = 0,
-) -> dict[str, pd.DataFrame]:
+) -> dict[str, pl.DataFrame]:
     counts, vocab, track_ids = _lyric_counts(rs)
     tracks, plays = _tracks_plays(rs)
     return _classify_keywords(
@@ -232,7 +235,7 @@ def collection_classification_compare(
     neg_ratio: int = 10,
     max_iter: int = 1000,
     seed: int = 0,
-) -> dict[str, dict[str, pd.DataFrame]]:
+) -> dict[str, dict[str, pl.DataFrame]]:
     counts, vocab, track_ids = _lyric_counts(rs)
     tracks, plays = _tracks_plays(rs)
     return _classify_keywords(

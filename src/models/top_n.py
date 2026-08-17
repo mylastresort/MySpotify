@@ -1,35 +1,30 @@
 """Top-N most-played songs (global or per-user)."""
 
-from __future__ import annotations
+import polars as pl
 
-import pandas as pd
-
-from src.data.loader import MySpotifyRecommender
+from src.data import MySpotifyRecommender
 
 
 def top_n_songs(
     rs: MySpotifyRecommender, n: int = 10, user_id: str | None = None
-) -> pd.DataFrame:
-    """Top *n* songs by total play count (or by a single user's own plays).
-
-    ``(user_id, song_id)`` is unique in the triplets table, so the per-user
-    path needs no groupby.
-    """
+) -> pl.DataFrame:
     if user_id is None:
         top = (
-            rs.triplets[["song_id", "play_count"]]
-            .groupby("song_id", as_index=False)["play_count"]
-            .sum()
-            .nlargest(n, "play_count")
+            rs.triplets.group_by("song_id")
+            .agg(pl.col("play_count").sum())
+            .sort("play_count", descending=True, maintain_order=True)
+            .head(n)
         )
     else:
-        top = rs.triplets[rs.triplets["user_id"] == user_id][["song_id", "play_count"]].nlargest(
-            n, "play_count"
+        top = (
+            rs.triplets.filter(pl.col("user_id") == user_id)
+            .select("song_id", "play_count")
+            .sort("play_count", descending=True, maintain_order=True)
+            .head(n)
         )
-
-    df = top.merge(
-        rs.tracks.drop_duplicates("song_id")[["song_id", "track_id", "artist", "title"]],
-        on="song_id",
-        how="left",
+    tracks = rs.tracks.unique(subset="song_id", keep="first").select(
+        "song_id", "track_id", "artist", "title"
     )
-    return df[["track_id", "artist", "title", "play_count"]]
+    return top.join(tracks, on="song_id", how="left").select(
+        "track_id", "artist", "title", "play_count"
+    )

@@ -1,29 +1,25 @@
 """Collaborative filtering (implicit ALS) on the user x song matrix."""
 
-from __future__ import annotations
-
 import numpy as np
-import pandas as pd
+import polars as pl
 from implicit.als import AlternatingLeastSquares
 from scipy import sparse
 
-from src.data.loader import MySpotifyRecommender
+from src.data import MySpotifyRecommender
 
 
 def build_user_item_matrix(rs: MySpotifyRecommender):
-    """User x song sparse matrix plus the id <-> index maps, from the triplets.
-
-    ``(user_id, song_id)`` is unique in the triplets table, so each row of the
-    matrix is a (user, song, play_count) triple.
-    """
-    u_codes, u_uniques = pd.factorize(rs.triplets["user_id"])
-    s_codes, s_uniques = pd.factorize(rs.triplets["song_id"])
-    user_idx = {u: int(i) for i, u in enumerate(u_uniques)}
-    song_idx = {s: int(i) for i, s in enumerate(s_uniques)}
+    triplets = rs.triplets
+    users = triplets["user_id"].cat.get_categories().to_list()
+    songs = triplets["song_id"].cat.get_categories().to_list()
+    u_codes = triplets["user_id"].cast(pl.UInt32).to_numpy().astype(np.int64)
+    s_codes = triplets["song_id"].cast(pl.UInt32).to_numpy().astype(np.int64)
+    user_idx = {u: i for i, u in enumerate(users)}
+    song_idx = {s: i for i, s in enumerate(songs)}
     idx_song = {i: s for s, i in song_idx.items()}
     mat = sparse.csr_matrix(
-        (rs.triplets["play_count"].to_numpy().astype(np.float64), (u_codes, s_codes)),
-        shape=(len(user_idx), len(song_idx)),
+        (triplets["play_count"].to_numpy().astype(np.float64), (u_codes, s_codes)),
+        shape=(len(users), len(songs)),
     )
     return mat, user_idx, song_idx, idx_song
 
@@ -38,7 +34,6 @@ def fit_als(
     random_state: int = 42,
     num_threads: int = 8,
 ) -> AlternatingLeastSquares:
-    """Fit an implicit-feedback ALS model (Hu, Koren & Volinsky 2008)."""
     model = AlternatingLeastSquares(
         factors=factors,
         regularization=regularization,
@@ -60,15 +55,7 @@ def evaluate_user_cf(
     sample_users: int = 50_000,
     random_state: int = 42,
 ) -> float:
-    """Pooled precision@top_n on a random sample of test users.
-
-    Replicates ``implicit.evaluation.precision_at_k``'s exact definition —
-    ``sum(hits) / sum(min(top_n, test_items))`` over test users, with
-    ``filter_already_liked_items=False`` — so the estimate matches the full
-    sweep (implicit's full sweep over ~1 M users takes ~15 min; 50 k users
-    give the same value within a couple of 0.1 pp in seconds via a batched
-    ``recommend`` call).
-    """
+    """Pooled precision@top_n, replicating implicit's definition on a random user sample."""
     test_users = np.flatnonzero(np.diff(user_item_test.indptr) > 0)
     rng = np.random.default_rng(random_state)
     n = min(sample_users, len(test_users))
@@ -95,19 +82,22 @@ def recommend_users_df(
     user_item: sparse.csr_matrix,
     user_idx: dict[str, int],
     idx_song: dict[int, str],
-    tracks_df: pd.DataFrame,
+    tracks_df: pl.DataFrame,
     top_n: int = 10,
-) -> pd.DataFrame:
-    """User recommendations as a display DataFrame (rank/artist/title/score)."""
+) -> pl.DataFrame:
     uid = user_idx[user_id]
     item_ids, scores = model.recommend(uid, user_item[uid], N=top_n)
-
-    tracks_dedup = tracks_df.drop_duplicates("song_id")[["song_id", "artist", "title"]]
-    rec_df = pd.DataFrame({"song_id": [idx_song[i] for i in item_ids], "score": scores})
-    rec_df = rec_df.merge(tracks_dedup, on="song_id", how="left")
-    rec_df.index += 1
-    rec_df.index.name = "rank"
-    return rec_df[["artist", "title", "score"]]
+    tracks = tracks_df.unique(subset="song_id", keep="first").select(
+        "song_id", "artist", "title"
+    )
+    recs = pl.DataFrame({"song_id": [idx_song[i] for i in item_ids], "score": scores})
+    if tracks["song_id"].dtype == pl.Categorical:
+        recs = recs.with_columns(pl.col("song_id").cast(pl.Categorical))
+    return (
+        recs.join(tracks, on="song_id", how="left")
+        .with_row_index("rank", offset=1)
+        .select("rank", "artist", "title", "score")
+    )
 
 
 def recommend_tracks_df(
@@ -115,22 +105,21 @@ def recommend_tracks_df(
     model: AlternatingLeastSquares,
     song_idx: dict[str, int],
     idx_song: dict[int, str],
-    tracks_df: pd.DataFrame,
+    tracks_df: pl.DataFrame,
     top_n: int = 10,
-) -> pd.DataFrame:
-    """Similar-track recommendations as a display DataFrame (rank/artist/title/score).
-
-    The seed itself is always the most similar item, so it is fetched with
-    ``top_n + 1`` neighbours and dropped.
-    """
+) -> pl.DataFrame:
     sid = song_idx[song_id]
     item_ids, scores = model.similar_items(sid, N=top_n + 1)
     mask = item_ids != sid
     item_ids, scores = item_ids[mask][:top_n], scores[mask][:top_n]
-
-    tracks_dedup = tracks_df.drop_duplicates("song_id")[["song_id", "artist", "title"]]
-    rec_df = pd.DataFrame({"song_id": [idx_song[i] for i in item_ids], "score": scores})
-    rec_df = rec_df.merge(tracks_dedup, on="song_id", how="left")
-    rec_df.index += 1
-    rec_df.index.name = "rank"
-    return rec_df[["artist", "title", "score"]]
+    tracks = tracks_df.unique(subset="song_id", keep="first").select(
+        "song_id", "artist", "title"
+    )
+    recs = pl.DataFrame({"song_id": [idx_song[i] for i in item_ids], "score": scores})
+    if tracks["song_id"].dtype == pl.Categorical:
+        recs = recs.with_columns(pl.col("song_id").cast(pl.Categorical))
+    return (
+        recs.join(tracks, on="song_id", how="left")
+        .with_row_index("rank", offset=1)
+        .select("rank", "artist", "title", "score")
+    )
