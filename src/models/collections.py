@@ -39,7 +39,7 @@ def _format_result(df: pl.DataFrame, top_n: int) -> pl.DataFrame:
     return (
         df.sort("play_count", descending=True, maintain_order=True)
         .head(top_n)
-        .with_row_index("index", offset=1)
+        .with_row_index("index", offset=0)
         .select("index", "artist", "title", "play_count")
     )
 
@@ -100,6 +100,7 @@ def collection_word2vec(
             .join(tracks, on="track_id", how="left")
             .join(plays, on="song_id", how="left")
             .with_columns(pl.col("play_count").fill_null(0))
+            
         )
         result[k] = _format_result(df, top_n)
     return result
@@ -195,9 +196,9 @@ def _classify_keywords(
                 .join(tracks, on="track_id", how="left")
                 .join(plays, on="song_id", how="left")
                 .with_columns(pl.col("play_count").fill_null(0))
-                .sort(["score", "play_count"], descending=[True, False])
+                .sort(["play_count"], descending=[True])
                 .head(top_n)
-                .with_row_index("index", offset=1)
+                .with_row_index("index", offset=0)
                 .select("index", "artist", "title", "play_count")
             )
             result[name][k] = df

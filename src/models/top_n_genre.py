@@ -38,6 +38,9 @@ def top_n_per_genre(
     tracks = rs.tracks.unique(subset="song_id", keep="first").select(
         "song_id", "track_id", "artist", "title"
     )
-    return top.join(tracks, on="song_id", how="left").select(
-        "track_id", "artist", "title", "play_count"
+    return (
+        top.join(tracks, on="song_id", how="left")
+        .select("artist", "title", "play_count")
+        .rename({"artist": "artist_name", "title": "track_title"})
+        .with_row_index(name="index_number", offset=0)
     )

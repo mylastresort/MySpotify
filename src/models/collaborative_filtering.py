@@ -95,8 +95,9 @@ def recommend_users_df(
         recs = recs.with_columns(pl.col("song_id").cast(pl.Categorical))
     return (
         recs.join(tracks, on="song_id", how="left")
-        .with_row_index("rank", offset=1)
-        .select("rank", "artist", "title", "score")
+        .select("artist", "title", "score")
+        .rename({"artist": "artist_name", "title": "track_title"})
+        .with_row_index("index_number", offset=0)
     )
 
 
@@ -116,8 +117,6 @@ def recommend_tracks_df(
         "song_id", "artist", "title"
     )
     recs = pl.DataFrame({"song_id": [idx_song[i] for i in item_ids], "score": scores})
-    if tracks["song_id"].dtype == pl.Categorical:
-        recs = recs.with_columns(pl.col("song_id").cast(pl.Categorical))
     return (
         recs.join(tracks, on="song_id", how="left")
         .with_row_index("rank", offset=1)
