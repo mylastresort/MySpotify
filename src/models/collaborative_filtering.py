@@ -3,6 +3,7 @@
 import numpy as np
 import polars as pl
 from implicit.als import AlternatingLeastSquares
+from implicit.evaluation import precision_at_k
 from scipy import sparse
 
 from src.data import MySpotifyRecommender
@@ -51,30 +52,9 @@ def evaluate_user_cf(
     model: AlternatingLeastSquares,
     user_item: sparse.csr_matrix,
     user_item_test: sparse.csr_matrix,
-    top_n: int = 10,
-    sample_users: int = 50_000,
-    random_state: int = 42,
+    K: int = 10,
 ) -> float:
-    """Pooled precision@top_n, replicating implicit's definition on a random user sample."""
-    test_users = np.flatnonzero(np.diff(user_item_test.indptr) > 0)
-    rng = np.random.default_rng(random_state)
-    n = min(sample_users, len(test_users))
-    sample = rng.choice(test_users, size=n, replace=False)
-
-    batch_ids, _ = model.recommend(sample, user_item[sample], N=top_n)
-
-    test_indices = user_item_test.indices
-    test_indptr = user_item_test.indptr
-    counts = np.diff(test_indptr)
-    relevant = 0.0
-    pr_div = 0.0
-    for j, u in enumerate(sample):
-        start, stop = test_indptr[u], test_indptr[u + 1]
-        test_items = set(test_indices[start:stop].tolist())
-        relevant += len(set(batch_ids[j].tolist()) & test_items)
-        pr_div += min(top_n, counts[u])
-    return relevant / pr_div
-
+    return precision_at_k(model, user_item, user_item_test, K=K, show_progress=True)
 
 def recommend_users_df(
     user_id: str,
@@ -86,7 +66,7 @@ def recommend_users_df(
     top_n: int = 10,
 ) -> pl.DataFrame:
     uid = user_idx[user_id]
-    item_ids, scores = model.recommend(uid, user_item[uid], N=top_n)
+    item_ids, scores = model.recommend(uid, user_item[uid], N=top_n, filter_already_liked_items=True)
     tracks = tracks_df.unique(subset="song_id", keep="first").select(
         "song_id", "artist", "title"
     )
@@ -95,7 +75,7 @@ def recommend_users_df(
         recs = recs.with_columns(pl.col("song_id").cast(pl.Categorical))
     return (
         recs.join(tracks, on="song_id", how="left")
-        .select("artist", "title", "score")
+        .select("artist", "title")
         .rename({"artist": "artist_name", "title": "track_title"})
         .with_row_index("index_number", offset=0)
     )
@@ -117,8 +97,9 @@ def recommend_tracks_df(
         "song_id", "artist", "title"
     )
     recs = pl.DataFrame({"song_id": [idx_song[i] for i in item_ids], "score": scores})
+    recs = recs.with_columns(pl.col("song_id").cast(tracks["song_id"].dtype))
     return (
         recs.join(tracks, on="song_id", how="left")
-        .with_row_index("rank", offset=1)
-        .select("rank", "artist", "title", "score")
+        .with_row_index("rank", offset=0)
+        .select("rank", "artist", "title")
     )
